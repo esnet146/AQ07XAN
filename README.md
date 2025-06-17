@@ -4,4 +4,4 @@ Climate AC Samsung AQ07XAN
 
 [Only!!! esp8266](only8266.txt)
 
-[ESPHome 2025.5.2] (new20250502.txt)
+[ESPHome 2025.5.2](new20250502.txt)
