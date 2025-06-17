@@ -1,0 +1,218 @@
+Install:
+
+Create dir homeassistant/esphome/include
+
+Copy to dir files irsamsung60.h 
+
+In YAML (config esphome) insert:
+
+```
+esphome:
+  includes: 
+    - include/irsamsung60.h
+  libraries:
+    - IRremoteESP8266
+
+climate:
+  - platform: custom
+    lambda: |-
+       auto samsungac = new SamsungAC();
+       samsungac->set_sensor(id(current_temperature));
+       App.register_component(samsungac);
+       return {samsungac};
+    climates:
+    - name: "Samsung AC"
+
+sensor:
+  - platform: homeassistant
+    name: "Temperature Sensor From Home Assistant"
+    id: current_temperature
+    entity_id: sensor.temperature_in_room
+    internal: true
+```
+
+You can specify any sensor whose values you want to see in the climate card. 
+These may be sensors of this or another esphome.
+It is important to specify the correct sensor ID.
+
+![climate](https://user-images.githubusercontent.com/64173457/159790553-b173f6d7-1af7-477a-8a24-db27c901c78a.PNG)
+
+```
+substitutions:
+  board_name: samsung
+  ble: !secret ble1
+esphome:
+  name: $board_name
+  includes: 
+    - include/irsamsung60.h
+  libraries:
+    - IRremoteESP8266
+wifi:
+  networks:
+  - ssid: !secret wifi1
+    password: !secret password1
+  ap:
+    ssid: "$board_name Hotspot"
+    password: !secret password1
+esp8266:
+  board: esp01_1m
+logger:
+  baud_rate: 0
+api:
+  encryption:
+    key: !secret keyapi 
+ota:
+  password: !secret passwordota
+web_server:
+  port: 80  
+climate:
+  - platform: custom
+    lambda: |-
+       auto samsungac = new SamsungAC();
+       samsungac->set_sensor(id(current_temperature));
+       App.register_component(samsungac);
+       return {samsungac};
+    climates:
+    - name: "Samsung AC"
+      id: my_samsung
+      on_control:
+        - lambda: |-
+            if (x.get_mode() != CLIMATE_MODE_OFF) {
+                id(turnoff_script).stop();
+                return;
+            }
+            if (id(condensate_sensor).state) {
+                id(turnoff_script).execute();
+                x.set_mode(CLIMATE_MODE_FAN_ONLY);
+            }
+dallas:
+  - pin: 12
+    update_interval: 10s
+sensor:
+  - platform: wifi_signal
+    name: WiFi_Signal.$board_name
+  - platform: uptime
+    name: uptime_sensor.$board_name
+  - platform: dallas
+    index: 0
+    name: Temp_out_$board_name
+    id: temperature_out
+    accuracy_decimals: 2
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 3
+  - platform: template
+    name: "Dew Point2 ${board_name}"
+    id: dev_point2
+    lambda: |-
+      float t, rh, b, c, temp1, gamma, dp;
+      t = id(current_temperature).state;
+      rh = id(current_humidity).state;
+      if ( t > 0) {
+        b = 17.368;
+        c = 238.88;
+      } else {
+        b = 17.966;
+        c = 247.15;
+      }
+      temp1 = (b - (t / 234.5)) * (t / (t + c));
+      gamma = log((rh / 100)*exp(temp1));
+      dp = (c * gamma) / (b - gamma);
+      return (dp);
+    unit_of_measurement: °C
+    icon: 'mdi:thermometer-alert'    
+  - platform: homeassistant
+    name: "Temperature Sensor From Home Assistant"
+    id: current_temperature
+    entity_id: sensor.ble_temperature_$ble
+    internal: true
+    accuracy_decimals: 1
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 1
+  - platform: homeassistant
+    name: "Humidity Sensor From Home Assistant"
+    id: current_humidity
+    entity_id: sensor.ble_humidity_$ble
+    internal: true
+    accuracy_decimals: 1
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 1
+output:
+  - platform: esp8266_pwm
+    id: led
+    pin: GPIO02
+    frequency: 500 Hz 
+    inverted: true
+light:
+  - platform: monochromatic
+    name: LED_1
+    output: led
+    id: led_1
+    internal: true
+    effects:
+      - pulse:
+          name: 1Pulse
+button:
+  - platform: restart
+    name: Reset.$board_name
+  - platform: factory_reset
+    name: Default_Settings.$board_name
+  - platform: safe_mode
+    name: "Restart Safe Mode.$board_name"
+binary_sensor:
+  - platform: status
+    name: Status.$board_name
+    id: status_id
+    internal: true
+    on_release:
+      then:
+        - light.turn_on:
+            id: led_1
+            brightness: 100%
+            effect: 1Pulse
+    on_press:
+      then:
+        - light.turn_off: led_1
+  - platform: template
+    name: Drying
+    icon: mdi:fan-clock
+    device_class: running
+    entity_category: diagnostic
+    id: drying_sensor
+    publish_initial_state: true
+    lambda: 'return id(turnoff_script).is_running();'
+    filters:
+      - delayed_off: 30s
+    on_release:
+      then:
+        - climate.control:
+            id: my_samsung
+            mode: "OFF"
+
+  - platform: template
+    name: Condensate
+    icon: mdi:water-percent-alert
+    device_class: moisture
+    entity_category: diagnostic
+    id: condensate_sensor
+    publish_initial_state: true
+    lambda: 'return id(temperature_out).state < ( (id(current_temperature).state+id(dev_point2).state) / 2 ) ;'
+    filters:
+      - delayed_off: 30s
+      - delayed_on: 5s
+script:
+  - id: turnoff_script
+    then:
+      - wait_until:
+          condition:
+            binary_sensor.is_off: condensate_sensor
+          timeout: 300s          
+```
