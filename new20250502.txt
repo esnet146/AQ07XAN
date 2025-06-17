@@ -1,0 +1,289 @@
+Актуально до принятия PR 8004
+
+Также использовал локальный вариант от этого PR и climate_ir для работы кондиционера в режиме АВТО вместо штатного Обогрев-Охлаждение. 
+Не принципиально, но более красиво будет заменить CLIMATE_MODE_HEAT_COOL на CLIMATE_MODE_AUTO
+
+Ну и теперь платформа не принципиальна, такой вариант работает на любых чипах
+```
+substitutions:
+  board_name: samsung
+
+esphome:
+  name: $board_name
+
+  on_boot:
+    - priority: -200.0
+      then:
+        - sensor.template.publish:
+            id: dev_point2
+            state: 10.0
+
+        - light.turn_on:
+            id: led_1
+            brightness: 100%
+            effect: 1Pulse
+
+esp8266:
+  board: esp01_1m
+
+wifi:
+  networks:
+  - ssid: !secret wifi1
+    password: !secret password1
+  ap:
+    ssid: "$board_name Hotspot"
+    password: !secret password1
+
+api:
+  encryption:
+    key: !secret keyapi 
+
+
+logger:
+    baud_rate: 0
+ota:
+  - platform: esphome  
+    password: !secret passwordota
+
+external_components:
+  - source: github://pr#8004
+    components: [ samsung ]
+
+#https://github.com/esphome/esphome/pull/8004
+
+# external_components:
+#   - source:
+#       type: local
+#       path: my_components
+#     components: [ samsung,climate_ir ]
+
+remote_transmitter:
+  - id: tr01  
+    pin:
+      id: my_ir_pin
+      number: GPIO14
+    carrier_duty_percent: 50%
+
+remote_receiver:
+  id: rcvr
+  buffer_size: 2k
+  # tolerance: 20%
+  tolerance: 55%
+  pin:
+    number: GPIO04
+    inverted: true
+  # dump: all
+
+climate:
+  - platform: samsung
+    name: "AC"
+    id: my_samsung
+    sensor: current_temperature
+    receiver_id: rcvr
+    on_control:
+      - lambda: |-
+          if (x.get_mode() != CLIMATE_MODE_OFF) {
+              id(turnoff_script).stop();
+              return;
+          }
+          if (id(condensate_sensor).state) {
+              id(turnoff_script).execute();
+              x.set_mode(CLIMATE_MODE_FAN_ONLY);
+          }
+
+
+one_wire:
+  - platform: gpio
+    pin: GPIO12
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi_Signal.$board_name
+  - platform: uptime
+    name: uptime_sensor.$board_name
+
+  - platform: adc
+    pin: VCC
+    name: Volt.$board_name
+    update_interval: 10s
+
+  - platform: dallas_temp
+    address: 0x873c01f096ad1828
+    name: Temp_out_$board_name
+    id: temperature_out
+    accuracy_decimals: 2
+    update_interval: 10s
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 3
+
+  - platform: template
+    name: "Dew Point2 ${board_name}"
+    id: dev_point2
+    lambda: |-
+      float t, rh, b, c, temp1, gamma, dp;
+      t = id(current_temperature).state;
+      rh = id(current_humidity).state;
+      if ( t > 0) {
+        b = 17.368;
+        c = 238.88;
+      } else {
+        b = 17.966;
+        c = 247.15;
+      }
+      temp1 = (b - (t / 234.5)) * (t / (t + c));
+      gamma = log((rh / 100)*exp(temp1));
+      dp = (c * gamma) / (b - gamma);
+      return (dp);
+    unit_of_measurement: °C
+    icon: 'mdi:thermometer-alert'    
+
+  - platform: homeassistant
+    name: "Temperature Sensor From Home Assistant"
+    id: current_temperature
+    entity_id: sensor.ble_temperature_a4c13846320c
+    internal: true
+    accuracy_decimals: 1
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 1
+  - platform: homeassistant
+    name: "Humidity Sensor From Home Assistant"
+    id: current_humidity
+    entity_id: sensor.ble_humidity_a4c13846320c
+    internal: true
+    accuracy_decimals: 1
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 1
+
+output:
+  - platform: esp8266_pwm
+    id: led
+    pin: GPIO02
+    frequency: 500 Hz 
+    inverted: true
+
+light:
+  - platform: monochromatic
+    name: LED_1
+    output: led
+    id: led_1
+    internal: true
+    effects:
+      - pulse:
+          name: 1Pulse
+
+button:
+  - platform: restart
+    name: Reset.$board_name
+  - platform: factory_reset
+    name: Default_Settings.$board_name
+  - platform: safe_mode
+    name: "Restart Safe Mode.$board_name"
+
+binary_sensor:
+  - platform: status
+    name: Status.$board_name
+    id: status_id
+    internal: true
+    on_release:
+      then:
+        - light.turn_on:
+            id: led_1
+            brightness: 100%
+            effect: 1Pulse
+    on_press:
+      then:
+        - light.turn_off: led_1
+  - platform: template
+    # "Продувка перед выключением"
+    name: Drying
+    icon: mdi:fan-clock
+    device_class: running
+    entity_category: diagnostic
+    id: drying_sensor
+    publish_initial_state: true
+    lambda: 'return id(turnoff_script).is_running();'
+
+  - platform: template
+    # "Конденсат"
+    name: Condensate
+    icon: mdi:water-percent-alert
+    device_class: moisture
+    entity_category: diagnostic
+    id: condensate_sensor
+    publish_initial_state: true
+    lambda: 'return id(temperature_out).state < ( (id(current_temperature).state+id(dev_point2).state) / 2 ) ;'
+    filters:
+      - delayed_off: 1min
+      - delayed_on: 5s
+
+  - platform: gpio
+    pin:
+      number: GPIO13
+      mode: INPUT_PULLUP
+      inverted: true
+    name: power_$board_name
+    filters:
+      - delayed_on: 1ms
+      # - delayed_on: 2s
+      - delayed_off: 2s
+    on_press:
+      then:
+        - logger.log: "Светодиод питания включен"
+        - script.execute: on_script
+    on_release:
+      then:
+        - logger.log: "Светодиод питания выключен"
+        - script.execute: off_script
+script:
+  # Скрипт продувки перед выключением
+  - id: turnoff_script
+    then:
+      - binary_sensor.template.publish:
+          id: drying_sensor
+          state: ON
+      - wait_until:
+          condition:
+            binary_sensor.is_off: condensate_sensor
+          timeout: 3min
+      - climate.control:
+          id: my_samsung
+          mode: "OFF"
+  - id: on_script
+    then:
+      - delay: 5s
+      - lambda: |-
+          if ( id(my_samsung).mode == CLIMATE_MODE_OFF ) {
+              auto call = id(my_samsung).make_call();
+              call.set_mode(CLIMATE_MODE_HEAT_COOL);
+              // call.set_mode(CLIMATE_MODE_AUTO);
+              call.set_target_temperature(25.0f);
+              call.set_fan_mode(CLIMATE_FAN_AUTO);
+              call.set_swing_mode(CLIMATE_SWING_VERTICAL);
+              id(my_ir_pin).set_pin(04);
+              call.perform();
+              id(my_ir_pin).set_pin(14);
+          }
+
+  - id: off_script
+    then:
+      - if:
+          condition:
+              script.is_running: turnoff_script
+          then:
+              - script.stop: off_script
+      - if:
+          condition:
+              - binary_sensor.is_on: condensate_sensor
+          then:
+              - script.execute: turnoff_script
+      
+```
