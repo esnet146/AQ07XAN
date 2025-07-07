@@ -66,7 +66,7 @@ remote_transmitter:
 
 remote_receiver:
   id: rcvr
-  buffer_size: 2k
+  buffer_size: 1k
   # tolerance: 20%
   tolerance: 55%
   pin:
@@ -84,11 +84,13 @@ climate:
       - lambda: |-
           if (x.get_mode() != CLIMATE_MODE_OFF) {
               id(turnoff_script).stop();
+              ESP_LOGE("samsungAC", "stop script");
               return;
           }
           if (id(condensate_sensor).state) {
               id(turnoff_script).execute();
               x.set_mode(CLIMATE_MODE_FAN_ONLY);
+              ESP_LOGE("samsungAC", "start fan, script");
           }
 
 
@@ -105,7 +107,7 @@ sensor:
   - platform: adc
     pin: VCC
     name: Volt.$board_name
-    update_interval: 10s
+    update_interval: 60s
 
   - platform: dallas_temp
     address: 0x873c01f096ad1828
@@ -113,11 +115,11 @@ sensor:
     id: temperature_out
     accuracy_decimals: 2
     update_interval: 10s
-    filters:
-      - median:
-          window_size: 7
-          send_every: 4
-          send_first_at: 3
+    # filters:
+    #   - median:
+    #       window_size: 7
+    #       send_every: 4
+    #       send_first_at: 3
 
   - platform: template
     name: "Dew Point2 ${board_name}"
@@ -139,6 +141,7 @@ sensor:
       return (dp);
     unit_of_measurement: °C
     icon: 'mdi:thermometer-alert'    
+    update_interval: 60s
 
   - platform: homeassistant
     name: "Temperature Sensor From Home Assistant"
@@ -146,22 +149,23 @@ sensor:
     entity_id: sensor.ble_temperature_a4c13846320c
     internal: true
     accuracy_decimals: 1
-    filters:
-      - median:
-          window_size: 7
-          send_every: 4
-          send_first_at: 1
+    # filters:
+    #   - median:
+    #       window_size: 7
+    #       send_every: 4
+    #       send_first_at: 1
+
   - platform: homeassistant
     name: "Humidity Sensor From Home Assistant"
     id: current_humidity
     entity_id: sensor.ble_humidity_a4c13846320c
     internal: true
     accuracy_decimals: 1
-    filters:
-      - median:
-          window_size: 7
-          send_every: 4
-          send_first_at: 1
+    # filters:
+    #   - median:
+    #       window_size: 7
+    #       send_every: 4
+    #       send_first_at: 1
 
 output:
   - platform: esp8266_pwm
@@ -187,7 +191,17 @@ button:
     name: Default_Settings.$board_name
   - platform: safe_mode
     name: "Restart Safe Mode.$board_name"
-
+  - platform: template
+    name: "FAN Mode.$board_name"
+    on_press: 
+      then:
+        - logger.log: "включаем вентиляцию кнопкой"
+        - climate.control:
+            id: my_samsung
+            mode: FAN_ONLY
+            fan_mode: LOW
+            swing_mode: VERTICAL 
+            
 binary_sensor:
   - platform: status
     name: Status.$board_name
@@ -222,23 +236,38 @@ binary_sensor:
     publish_initial_state: true
     lambda: 'return id(temperature_out).state < ( (id(current_temperature).state+id(dev_point2).state) / 2 ) ;'
     filters:
-      - delayed_off: 1min
+      - delayed_off: 2min
       - delayed_on: 5s
-
+    # on_release: 
+    #   then:
+    #     - lambda: |-
+    #           auto call = id(my_samsung).make_call();
+    #           call.set_mode(CLIMATE_MODE_OFF);
+    #           call.perform();
   - platform: gpio
     pin:
       number: GPIO13
       mode: INPUT_PULLUP
       inverted: true
     name: power_$board_name
+    id: power_on
     filters:
       - delayed_on: 1ms
       # - delayed_on: 2s
-      - delayed_off: 2s
+      - delayed_off: 3s
     on_press:
       then:
         - logger.log: "Светодиод питания включен"
-        - script.execute: on_script
+        - delay: 2s
+        - if:
+            condition:
+              for:
+                time: 2s
+                condition:
+                  binary_sensor.is_on: power_on
+            then:
+              - logger.log: "Уже Пора включать"
+              - script.execute: on_script
     on_release:
       then:
         - logger.log: "Светодиод питания выключен"
@@ -247,43 +276,112 @@ script:
   # Скрипт продувки перед выключением
   - id: turnoff_script
     then:
+      - logger.log: "Скрипт продувки запущен"
       - binary_sensor.template.publish:
           id: drying_sensor
           state: ON
       - wait_until:
           condition:
             binary_sensor.is_off: condensate_sensor
-          timeout: 3min
+          timeout: 6min
+      - logger.log: "Скрипт продувки остановлен"
+      - delay: 5s
+      # - lambda: |-
+      #         auto call = id(my_samsung).make_call();
+      #         call.set_mode(CLIMATE_MODE_OFF);
+      #         call.set_target_temperature(25.0f);
+      #         call.set_fan_mode(CLIMATE_FAN_AUTO);
+      #         call.set_swing_mode(CLIMATE_SWING_VERTICAL);
+      #         call.perform();
+      # - delay: 5s
+      # - if:
+      #     condition:
+      #         binary_sensor.is_on: power_on
+      - logger.log: "Вырубаем кондей"
       - climate.control:
           id: my_samsung
           mode: "OFF"
-  - id: on_script
-    then:
-      - delay: 5s
-      - lambda: |-
-          if ( id(my_samsung).mode == CLIMATE_MODE_OFF ) {
-              auto call = id(my_samsung).make_call();
-              call.set_mode(CLIMATE_MODE_HEAT_COOL);
-              // call.set_mode(CLIMATE_MODE_AUTO);
-              call.set_target_temperature(25.0f);
-              call.set_fan_mode(CLIMATE_FAN_AUTO);
-              call.set_swing_mode(CLIMATE_SWING_VERTICAL);
-              id(my_ir_pin).set_pin(04);
-              call.perform();
-              id(my_ir_pin).set_pin(14);
-          }
+      - logger.log: "Скрипт продувки остановлен совсем"
 
-  - id: off_script
+
+  - id: on_script
     then:
       - if:
           condition:
               script.is_running: turnoff_script
           then:
-              - script.stop: off_script
+              - script.stop: turnoff_script
+      - logger.log: "Скрипт включения запущен"
+      # - delay: 5s
+      - delay: 0.1min
+      - logger.log: "прошло 6 секунд"
       - if:
           condition:
-              - binary_sensor.is_on: condensate_sensor
+            for:
+              time: 5s
+              condition:
+                binary_sensor.is_on: power_on
           then:
+            - logger.log: "Пора включать"
+            - lambda: |-
+                if ( id(my_samsung).mode == CLIMATE_MODE_OFF ) {
+                    auto call = id(my_samsung).make_call();
+                    call.set_mode(CLIMATE_MODE_AUTO);
+                    call.set_target_temperature(25.0f);
+                    call.set_fan_mode(CLIMATE_FAN_AUTO);
+                    call.set_swing_mode(CLIMATE_SWING_VERTICAL);
+                    id(my_ir_pin).set_pin(04);
+                    call.perform();
+                    id(my_ir_pin).set_pin(14);
+                }
+  - id: off_script
+    then:
+      - logger.log: "Скрипт ввырубания запущен"
+      - delay: 2s
+      - if:
+          condition:
+              binary_sensor.is_on: condensate_sensor
+          then:
+              - logger.log: "включаем вентиляцию"
+              - lambda: |-
+                  if ( id(my_samsung).mode != CLIMATE_MODE_FAN_ONLY ) {
+                      auto call = id(my_samsung).make_call();
+                      call.set_mode(CLIMATE_MODE_FAN_ONLY);
+                      call.set_target_temperature(25.0f);
+                      call.set_fan_mode(CLIMATE_FAN_LOW);
+                      call.set_swing_mode(CLIMATE_SWING_VERTICAL);
+                      call.perform();
+                  }
+              - delay: 2s
+              - if:
+                  condition:
+                      lambda: 'return (id(my_samsung).mode != CLIMATE_MODE_FAN_ONLY );'
+                  then:
+                      - logger.log: "вентиляция не включена, повторим"
+                      - climate.control:
+                          id: my_samsung
+                          mode: FAN_ONLY
+                          fan_mode: LOW
+                          swing_mode: VERTICAL 
+
+      - if:
+          condition:
+              script.is_running: turnoff_script
+          then:
+              script.stop: off_script
+      - if:
+          condition:
+              binary_sensor.is_on: condensate_sensor
+          then:
+              - delay: 2s
               - script.execute: turnoff_script
-      
+          else:
+              - logger.log: "конденсата нет, выключаем"
+              - lambda: |-
+                  if ( id(my_samsung).mode != CLIMATE_MODE_OFF ) {
+                      auto call = id(my_samsung).make_call();
+                      call.set_mode(CLIMATE_MODE_OFF);
+                      call.perform();
+                  }
+
 ```
